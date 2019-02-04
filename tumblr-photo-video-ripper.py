@@ -8,7 +8,8 @@ from six.moves import queue as Queue
 from threading import Thread
 import re
 import json
-
+import pandas as pd
+import time
 
 # Setting timeout
 TIMEOUT = 10
@@ -57,17 +58,35 @@ def video_default_match():
 
 
 class DownloadWorker(Thread):
-    def __init__(self, queue, proxies=None):
+    def __init__(self, queue, proxies=None, media_url_df=None):
         Thread.__init__(self)
         self.queue = queue
         self.proxies = proxies
+        self.media_url_df = media_url_df
+        self.media_index = 1
         self._register_regex_match_rules()
 
     def run(self):
         while True:
             medium_type, post, target_folder = self.queue.get()
-            self.download(medium_type, post, target_folder)
+            # self.download(medium_type, post, target_folder)
+            self.fetch_download_urls(medium_type, post, target_folder)
             self.queue.task_done()
+        # save download url to csv file   
+
+    def fetch_download_urls(self, medium_type, post, target_folder):
+        try:
+            medium_url = self._handle_medium_url(medium_type, post)
+            media_name, medium_url = self._get_real_url(medium_url, medium_type)
+            print(medium_url)
+            if medium_url is not None:
+                self.media_url_df.loc[self.media_index] = {
+                    'media_url': medium_url,
+                    'media_type': medium_type
+                }
+                self.media_index += 1
+        except TypeError:
+            pass
 
     def download(self, medium_type, post, target_folder):
         try:
@@ -103,7 +122,10 @@ class DownloadWorker(Thread):
                             "issues/new attached with below information:\n\n"
                             "%s" % post)
 
-    def _download(self, medium_type, medium_url, target_folder):
+    def _get_real_url(self, medium_url, medium_type):
+        '''
+        return file_name & file_url
+        '''
         medium_name = medium_url.split("/")[-1].split("?")[0]
         if medium_type == "video":
             if not medium_name.startswith("tumblr"):
@@ -112,7 +134,10 @@ class DownloadWorker(Thread):
 
             medium_name += ".mp4"
             medium_url = 'https://vt.tumblr.com/' + medium_name
+        return medium_name, medium_url
 
+    def _download(self, medium_type, medium_url, target_folder):
+        medium_name, medium_url = self._get_real_url(medium_url, medium_type)
         file_path = os.path.join(target_folder, medium_name)
         if not os.path.isfile(file_path):
             print("Downloading %s from %s.\n" % (medium_name,
@@ -150,14 +175,21 @@ class CrawlerScheduler(object):
     def __init__(self, sites, proxies=None):
         self.sites = sites
         self.proxies = proxies
+        self.media_url_df = pd.DataFrame(columns=[
+            'media_url',
+            'media_type'
+        ])
         self.queue = Queue.Queue()
         self.scheduling()
 
     def scheduling(self):
         # create workers
         for x in range(THREADS):
-            worker = DownloadWorker(self.queue,
-                                    proxies=self.proxies)
+            worker = DownloadWorker(
+                self.queue,
+                proxies=self.proxies,
+                media_url_df=self.media_url_df
+            )
             # Setting daemon to True will let the main thread exit
             # even though the workers are blocking
             worker.daemon = True
@@ -167,8 +199,10 @@ class CrawlerScheduler(object):
             self.download_media(site)
 
     def download_media(self, site):
-        self.download_photos(site)
+        # self.download_photos(site)
         self.download_videos(site)
+        self.media_url_df.to_csv('{}/media_urls.csv'.format(site))
+        print('media_urls.csv saved')
 
     def download_videos(self, site):
         self._download_media(site, "video", START)
@@ -194,6 +228,7 @@ class CrawlerScheduler(object):
         start = START
         while True:
             media_url = base_url.format(site, medium_type, MEDIA_NUM, start)
+            time.sleep(0.2)
             response = requests.get(media_url,
                                     proxies=self.proxies)
             if response.status_code == 404:
